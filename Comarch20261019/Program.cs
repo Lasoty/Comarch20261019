@@ -1,91 +1,93 @@
-﻿using System.Diagnostics;
-using System.Threading;
+﻿using System.Collections.Concurrent;
 
 internal static class Program
 {
-    private const int WorkItems = 50;
+    private const int Iterations = 500_000;
 
     public static async Task Main()
     {
-        Console.WriteLine($"Main thread: {Environment.CurrentManagedThreadId}");
+        Console.WriteLine($"Expected result: {Iterations}");
         Console.WriteLine();
 
-        RunWithThreads();
-        RunWithThreadPool();
-        await RunWithTasksAsync();
+        RunBrokenCounter();
+        RunWithLock();
+        RunWithInterlocked();
+        await RunWithSemaphoreSlimAsync();
+        RunWithConcurrentDictionary();
     }
 
-    private static void RunWithThreads()
+    private static void RunBrokenCounter()
     {
-        Console.WriteLine("=== Thread ===");
-        var stopwatch = Stopwatch.StartNew();
-        var threads = new List<Thread>();
+        var counter = 0;
 
-        for (var i = 1; i <= WorkItems; i++)
+        Parallel.For(0, Iterations, _ =>
         {
-            var jobId = i;
-            var thread = new Thread(() => SimulateWork(jobId, "Thread"));
-            threads.Add(thread);
-            thread.Start();
-        }
+            counter++;
+        });
 
-        foreach (var thread in threads)
-        {
-            thread.Join();
-        }
-
-        Console.WriteLine($"Thread finished in {stopwatch.ElapsedMilliseconds} ms");
-        Console.WriteLine();
+        Console.WriteLine($"Broken counter:             {counter}");
     }
 
-    private static void RunWithThreadPool()
+    private static void RunWithLock()
     {
-        Console.WriteLine("=== ThreadPool ===");
-        var stopwatch = Stopwatch.StartNew();
-        using var countdown = new CountdownEvent(WorkItems);
+        var counter = 0;
+        var sync = new object();
 
-        for (var i = 1; i <= WorkItems; i++)
+        Parallel.For(0, Iterations, _ =>
         {
-            var jobId = i;
-            ThreadPool.QueueUserWorkItem(_ =>
+            lock (sync)
             {
+                counter++;
+            }
+        });
+
+        Console.WriteLine($"Counter with lock:          {counter}");
+    }
+
+    private static void RunWithInterlocked()
+    {
+        var counter = 0;
+
+        Parallel.For(0, Iterations, _ =>
+        {
+            Interlocked.Increment(ref counter);
+        });
+
+        Console.WriteLine($"Counter with Interlocked:   {counter}");
+    }
+
+    private static async Task RunWithSemaphoreSlimAsync()
+    {
+        var counter = 0;
+        using var semaphore = new SemaphoreSlim(1, 1);
+
+        var tasks = Enumerable.Range(0, Iterations)
+            .Select(async _ =>
+            {
+                await semaphore.WaitAsync();
                 try
                 {
-                    SimulateWork(jobId, "ThreadPool");
+                    counter++;
                 }
                 finally
                 {
-                    countdown.Signal();
+                    semaphore.Release();
                 }
             });
-        }
-
-        countdown.Wait();
-        Console.WriteLine($"ThreadPool finished in {stopwatch.ElapsedMilliseconds} ms");
-        Console.WriteLine();
-    }
-
-    private static async Task RunWithTasksAsync()
-    {
-        Console.WriteLine("=== Task.Run ===");
-        var stopwatch = Stopwatch.StartNew();
-        var tasks = new List<Task>();
-
-        for (var i = 1; i <= WorkItems; i++)
-        {
-            var jobId = i;
-            tasks.Add(Task.Run(() => SimulateWork(jobId, "Task.Run")));
-        }
 
         await Task.WhenAll(tasks);
-        Console.WriteLine($"Task.Run finished in {stopwatch.ElapsedMilliseconds} ms");
-        Console.WriteLine();
+        Console.WriteLine($"Counter with SemaphoreSlim: {counter}");
     }
 
-    private static void SimulateWork(int jobId, string mechanism)
+    private static void RunWithConcurrentDictionary()
     {
-        Console.WriteLine($"{mechanism,-10} job {jobId,2} started on thread {Environment.CurrentManagedThreadId}");
-        Thread.Sleep(250);
-        Console.WriteLine($"{mechanism,-10} job {jobId,2} ended   on thread {Environment.CurrentManagedThreadId}");
+        var dictionary = new ConcurrentDictionary<string, int>();
+
+        Parallel.For(0, Iterations, _ =>
+        {
+            dictionary.AddOrUpdate("counter", 1, (_, oldValue) => oldValue + 1);
+        });
+
+        Console.WriteLine($"Counter in dictionary:      {dictionary["counter"]}");
     }
 }
