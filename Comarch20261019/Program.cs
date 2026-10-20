@@ -1,52 +1,79 @@
 ﻿using System.Collections.Concurrent;
+using System.Diagnostics;
 
 internal static class Program
 {
-    public static void Main()
+    public static async Task Main()
     {
-        var events = GenerateEvents(20_000);
-        var counts = new ConcurrentDictionary<string, int>();
-        var errors = 0;
+        var numbers = Enumerable.Range(35_000, 2_000).ToArray();
 
-        Parallel.ForEach(events, logEvent =>
+        Measure("Sequential CPU", () =>
         {
-            counts.AddOrUpdate(
-                logEvent.Category,
-                addValue: 1,
-                updateValueFactory: (_, oldValue) => oldValue + 1);
-
-            if (!logEvent.IsSuccess)
-            {
-                Interlocked.Increment(ref errors);
-            }
+            var results = numbers.Select(CpuIntensiveWork).ToList();
+            Console.WriteLine($"Results: {results.Count}");
         });
 
-        Console.WriteLine("Counts:");
-        foreach (var item in counts.OrderBy(x => x.Key))
+        Measure("Parallel.ForEach CPU", () =>
         {
-            Console.WriteLine($"{item.Key,-12}: {item.Value}");
-        }
+            var results = new ConcurrentBag<int>();
+            var options = new ParallelOptions
+            {
+                MaxDegreeOfParallelism = Environment.ProcessorCount
+            };
 
-        Console.WriteLine($"Errors: {errors}");
-        Console.WriteLine($"Total counted: {counts.Values.Sum()}");
-        Console.WriteLine($"Expected: {events.Count}");
+            Parallel.ForEach(numbers, options, number =>
+            {
+                results.Add(CpuIntensiveWork(number));
+            });
+
+            Console.WriteLine($"Results: {results.Count}");
+        });
+
+        await MeasureAsync("Parallel.ForEachAsync mixed", async () =>
+        {
+            var results = new ConcurrentBag<int>();
+            var options = new ParallelOptions
+            {
+                MaxDegreeOfParallelism = 10
+            };
+
+            await Parallel.ForEachAsync(numbers, options, async (number, token) =>
+            {
+                await Task.Delay(1, token);
+                results.Add(CpuIntensiveWork(number));
+            });
+
+            Console.WriteLine($"Results: {results.Count}");
+        });
     }
 
-    private static List<LogEvent> GenerateEvents(int count)
+    private static int CpuIntensiveWork(int value)
     {
-        var categories = new[] { "Orders", "Payments", "Invoices", "Users", "Reports" };
-        var random = new Random(123);
-        var result = new List<LogEvent>();
-
-        for (var i = 0; i < count; i++)
+        var result = 0;
+        for (var i = 2; i < 250; i++)
         {
-            result.Add(new LogEvent(
-                Category: categories[random.Next(categories.Length)],
-                IsSuccess: random.NextDouble() > 0.15));
+            if (value % i == 0)
+            {
+                result++;
+            }
         }
 
         return result;
     }
-}
 
-internal sealed record LogEvent(string Category, bool IsSuccess);
+    private static void Measure(string name, Action action)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        action();
+        Console.WriteLine($"{name}: {stopwatch.ElapsedMilliseconds} ms");
+        Console.WriteLine();
+    }
+
+    private static async Task MeasureAsync(string name, Func<Task> action)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        await action();
+        Console.WriteLine($"{name}: {stopwatch.ElapsedMilliseconds} ms");
+        Console.WriteLine();
+    }
+}
