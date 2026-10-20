@@ -1,79 +1,98 @@
-﻿using System.Collections.Concurrent;
-using System.Diagnostics;
+﻿using System.Threading.Channels;
 
 internal static class Program
 {
     public static async Task Main()
     {
-        var numbers = Enumerable.Range(35_000, 2_000).ToArray();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
 
-        Measure("Sequential CPU", () =>
+        var channel = Channel.CreateBounded<Job>(new BoundedChannelOptions(10)
         {
-            var results = numbers.Select(CpuIntensiveWork).ToList();
-            Console.WriteLine($"Results: {results.Count}");
+            FullMode = BoundedChannelFullMode.Wait,
+            SingleReader = false,
+            SingleWriter = false
         });
 
-        Measure("Parallel.ForEach CPU", () =>
+        var processed = 0;
+        var failed = 0;
+
+        var producers = Enumerable.Range(1, 3)
+            .Select(producerId => ProduceAsync(producerId, channel.Writer, cts.Token))
+            .ToList();
+
+        var consumers = Enumerable.Range(1, 4)
+            .Select(consumerId => ConsumeAsync(consumerId, channel.Reader, cts.Token, () =>
+            {
+                Interlocked.Increment(ref processed);
+            }, () =>
+            {
+                Interlocked.Increment(ref failed);
+            }))
+            .ToList();
+
+        try
         {
-            var results = new ConcurrentBag<int>();
-            var options = new ParallelOptions
-            {
-                MaxDegreeOfParallelism = Environment.ProcessorCount
-            };
-
-            Parallel.ForEach(numbers, options, number =>
-            {
-                results.Add(CpuIntensiveWork(number));
-            });
-
-            Console.WriteLine($"Results: {results.Count}");
-        });
-
-        await MeasureAsync("Parallel.ForEachAsync mixed", async () =>
+            await Task.WhenAll(producers);
+            channel.Writer.Complete();
+            await Task.WhenAll(consumers);
+        }
+        catch (OperationCanceledException)
         {
-            var results = new ConcurrentBag<int>();
-            var options = new ParallelOptions
-            {
-                MaxDegreeOfParallelism = 10
-            };
-
-            await Parallel.ForEachAsync(numbers, options, async (number, token) =>
-            {
-                await Task.Delay(1, token);
-                results.Add(CpuIntensiveWork(number));
-            });
-
-            Console.WriteLine($"Results: {results.Count}");
-        });
-    }
-
-    private static int CpuIntensiveWork(int value)
-    {
-        var result = 0;
-        for (var i = 2; i < 250; i++)
-        {
-            if (value % i == 0)
-            {
-                result++;
-            }
+            channel.Writer.TryComplete();
+            Console.WriteLine("Pipeline cancelled.");
         }
 
-        return result;
+        Console.WriteLine();
+        Console.WriteLine($"Processed: {processed}");
+        Console.WriteLine($"Failed:    {failed}");
     }
 
-    private static void Measure(string name, Action action)
+    private static async Task ProduceAsync(
+        int producerId,
+        ChannelWriter<Job> writer,
+        CancellationToken cancellationToken)
     {
-        var stopwatch = Stopwatch.StartNew();
-        action();
-        Console.WriteLine($"{name}: {stopwatch.ElapsedMilliseconds} ms");
-        Console.WriteLine();
+        for (var i = 1; i <= 25; i++)
+        {
+            var job = new Job((producerId * 100) + i, producerId);
+            await writer.WriteAsync(job, cancellationToken);
+            Console.WriteLine($"Producer {producerId}: produced job {job.Id}");
+            await Task.Delay(Random.Shared.Next(10, 50), cancellationToken);
+        }
     }
 
-    private static async Task MeasureAsync(string name, Func<Task> action)
+    private static async Task ConsumeAsync(
+        int consumerId,
+        ChannelReader<Job> reader,
+        CancellationToken cancellationToken,
+        Action onProcessed,
+        Action onFailed)
     {
-        var stopwatch = Stopwatch.StartNew();
-        await action();
-        Console.WriteLine($"{name}: {stopwatch.ElapsedMilliseconds} ms");
-        Console.WriteLine();
+        await foreach (var job in reader.ReadAllAsync(cancellationToken))
+        {
+            try
+            {
+                await ProcessAsync(job, cancellationToken);
+                onProcessed();
+                Console.WriteLine($"Consumer {consumerId}: processed job {job.Id}");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                onFailed();
+                Console.WriteLine($"Consumer {consumerId}: job {job.Id} failed: {ex.Message}");
+            }
+        }
+    }
+
+    private static async Task ProcessAsync(Job job, CancellationToken cancellationToken)
+    {
+        await Task.Delay(Random.Shared.Next(40, 120), cancellationToken);
+
+        if (job.Id % 17 == 0)
+        {
+            throw new InvalidOperationException("Simulated processing error.");
+        }
     }
 }
+
+internal sealed record Job(int Id, int ProducerId);
